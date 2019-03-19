@@ -1,0 +1,38 @@
+#!/bin/sh
+
+mount -t proc none /proc
+mount -t sysfs sysfs /sys
+mount -t ramfs none /tmp
+
+
+echo > /dev/mdev.seq
+echo /sbin/mdev > /proc/sys/kernel/hotplug
+mdev -s
+
+syslogd -s0 -f/etc/syslog.conf
+
+modprobe 8188eu
+modprobe nuc970_lcd_matrix_ctrl
+modprobe ttyPos
+
+
+ifconfig lo up
+# ifconfig eth0 up
+# udhcpc -i eth0 &
+# ifconfig wlan0 up
+
+sysctl -p
+
+chmod 666 /dev/null
+mkdir /dev/pts
+mount -t devpts devpts /dev/pts
+
+dropbear
+/usr/bin/cash fiscat &
+
+cd /userScripts
+./updateFiscatScript.sh
+./updateCorrScript.sh&
+
+cd /FisGo
+./fiscat &

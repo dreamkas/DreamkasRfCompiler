@@ -1,0 +1,290 @@
+#!/bin/sh
+
+export WPA_CONFIG="/etc/wpa_supplicant.conf"
+export WPA_BIN="/usr/sbin/wpa_supplicant"
+export WPACLI="/usr/local/bin/wpa_cli"
+export WLAN_IF="wlan0"
+export WLAN_TIMEOUT=60
+export LD_LIBRARY_PATH=/usr/local/lib
+
+
+start_fiscat()
+{
+    start_networks
+}
+
+start_networks()
+{
+    eth_connect
+}
+
+wifi()
+{
+    case $1 in
+	start) wifi_start;;
+        stop) wifi_kill_wpa_supplicant;;
+        enabled) wifi_enabled;;
+        scan) wifi_scan;;
+        scan_results) wifi_scan_results;;
+        connect) wifi_connect;;
+        disconnect) wifi_disconnect;;
+        status) wifi_status;;
+        info) wifi_info;;
+        check) wifi_check;;
+        reset) wifi_create_default_config;;
+        *) echo "Usage: $(basename $0) wifi {connect|disconnect|status|info|status|scan}";;     
+    esac
+}
+
+wifi_create_default_config()
+{
+    touch /etc/wificfg;
+    echo "PSK=12345678" >> /etc/wificfg;
+    echo "SEC=2" >> /etc/wificfg;
+    echo "SSID=DefaultWifi" >> /etc/wificfg;
+
+    touch /etc/wpa_supplicant.conf
+    echo "ctrl_interface=/var/run/wpa_supplicant" >> /etc/wpa_supplicant.conf
+    echo "network={" >> /etc/wpa_supplicant.conf
+    echo 'ssid="DefaultWifi"' >> /etc/wpa_supplicant.conf
+    echo 'psk="12345678"' >> /etc/wpa_supplicant.conf
+    echo "}" >> /etc/wpa_supplicant.conf
+}
+
+wifi_kill_wpa_supplicant()
+{
+    proc_cnt=$(grep wpa_supplicant|wc -l);
+
+    killall wpa_supplicant
+    sleep 1;
+    killall wpa_supplicant
+
+    echo "wpa_supplicant kill success!"
+    rm /var/run/wpa_supplicant/$WLAN_IF
+}
+
+wifi_start()
+{ 
+    #create process wpa_supplicant
+    $WPA_BIN -B -i "$WLAN_IF" -Dwext -c "$WPA_CONFIG"
+
+    wpa_supp_corr_flag=$(grep "wpa_supplicant");
+
+    if [ $wpa_supp_corr_flag != "" ]; then
+	/bin/echo "1" > /FisGo/wifi/startSupplicantFlag
+    else
+	/bin/echo "0" > /FisGo/wifi/startSupplicantFlag
+    fi
+}
+
+wifi_enabled()
+{
+    local RET=1
+    /bin/pidof wpa_supplicant > /dev/null 2>&1 || RET=0
+    /bin/echo $RET > /FisGo/wifi/enabled;
+}
+
+wifi_scan()
+{
+    local result_wlan
+
+    echo "----- START SCAN "
+
+    while ! $WPACLI -i$WLAN_IF scan && echo "+++++++++++++++++++++++" || echo "----------------------------"; do
+        sleep 1
+    done
+    
+    echo "---- RESULT = $?     $result_wlan"
+    
+    echo "----- END SLEEP SCAN "
+
+    $WPACLI -i$WLAN_IF scan_results | while read network; do
+    
+        echo "---- NET : $network"
+    
+        /bin/echo $network | /bin/grep -qs "signal level" && continue
+        unset SSID FLAGS SEC LEVEL
+
+        SSID=$(echo $network | awk '{$1=$2=$3=$4=""; print $0}' | sed "s/^  *//")
+        FLAGS=$(echo $network | awk {'print $4'})
+        LEVEL=$(echo $network | awk {'print $3'})
+
+        SEC=0
+
+        /bin/echo $FLAGS | /bin/grep -qs "WPA-PSK" && SEC=1
+        /bin/echo $FLAGS | /bin/grep -qs "WPA2-PSK" && SEC=2
+        /bin/echo $FLAGS | /bin/grep -qs "WEP" && SEC=3
+        /bin/echo $FLAGS | /bin/grep -qs "EAP" && SEC=4
+
+        if [ $SEC -lt 4 -a -n "$SSID" ]; then
+	    /bin/echo $SSID >> wifi/netlists/ssidList;
+	    /bin/echo $SEC >> wifi/netlists/secList;
+	    /bin/echo $LEVEL >> wifi/netlists/levelList;
+        fi
+    done | /usr/bin/sort
+    
+    echo "----- END SCAN "
+}
+
+wifi_info()
+{
+    if [ "$(wifi_status)" == "0" ]; then
+        return 0
+    fi
+
+    local COUNT=0
+
+    echo IPADDR=$(ifconfig $WLAN_IF | grep "inet addr" | awk {'print $2'} | sed "s/addr://")
+    echo MASK=$(ifconfig $WLAN_IF | grep "inet addr" | awk {'print $4'} | sed "s/Mask://")
+    echo GATEWAY=$(/sbin/ip r | grep $WLAN_IF | grep default | awk {'print $3'})
+
+    for ns in $(/bin/cat /etc/resolv.conf | grep nameserver | grep $WLAN_IF | awk {'print $2'}); do
+        COUNT=$((COUNT+1))
+        echo DNS$COUNT=$ns
+    done
+
+    echo LEVEL=$($WPACLI signal_poll | grep RSSI | sed "s/RSSI=//")
+}
+
+wifi_status()
+{
+    #$WPACLI status
+
+    if $WPACLI status | grep -qs "ssid=$SSID"; then
+        local IPADDR=$(ifconfig $WLAN_IF | grep "inet addr" | awk {'print $2'} | sed "s/addr://")  > /dev/null
+        if [ -z $IPADDR ]; then
+            /bin/echo "0" > /FisGo/wifi/status
+        else
+            /bin/echo "1" > /FisGo/wifi/status
+        fi
+    else 
+        /bin/echo "0" > /FisGo/wifi/status
+    fi
+}
+
+wifi_connect()
+{
+    local WAIT=1
+    #while ! /sbin/ifconfig $WLAN_IF up > /dev/null 2>&1; do
+    while ! /sbin/ifconfig $WLAN_IF up; do
+        sleep 1
+        echo "Waiting wlan0 up for $WAIT seconds"
+        WAIT=$(($WAIT+1))
+        if [ $WAIT -gt 30 ]; then
+            return 1
+        fi
+    done
+
+    #$WPA_BIN -B -i "$WLAN_IF" -Dwext -c "$WPA_CONFIG" > /dev/null 2>&1
+    $WPA_BIN -B -i "$WLAN_IF" -Dwext -c "$WPA_CONFIG"
+
+    sleep 3
+
+    if [ -z $IPADDR ]; then
+        wifi_kill_dhcp
+        /sbin/udhcpc -t 5 -n -i $WLAN_IF
+    else
+        /sbin/ifconfig $WLAN_IF $IPADDR netmask $MASK
+        /bin/sed -i "/$WLAN_IF/d" /etc/resolv.conf
+        [ -z $DNS1 ] || /bin/echo "nameserver $DNS1 $WLAN_IF" >> /etc/resolv.conf
+        [ -z $DNS2 ] || /bin/echo "nameserver $DNS2 $WLAN_IF" >> /etc/resolv.conf
+        [ -z $GATEWAY ] || /sbin/route add default metric 10 gw $GATEWAY
+    fi
+}
+
+wifi_disconnect()
+{
+    # if [ "$(wifi_status)" == 0 ]; then
+    #    return 0
+    # fi
+    
+    wifi_kill_dhcp
+
+    if /bin/pidof wpa_supplicant > /dev/null 2>&1; then
+        /bin/echo disable_network 0 | $WPACLI > /dev/null 2>&1
+    fi
+    
+    /sbin/ifconfig $WLAN_IF 0.0.0.0
+    /bin/sed -i "/$WLAN_IF/d" /etc/resolv.conf
+    kill $(grep -f "wpa_supplicant") > /dev/null 2>&1
+}
+
+wifi_kill_dhcp()
+{
+    PID=$(grep -f "udhcpc -b -i $WLAN_IF")
+    if [ ! -z $PID ]; then
+        while /bin/kill $PID > /dev/null 2>&1; do
+            /bin/sleep 1
+        done
+    fi
+}
+
+eth()
+{
+    case $1 in
+        info) eth_info;;
+        link) eth_link;;
+        connect) eth_connect;;
+        *) echo "Usage: $(basename $0) eth {link|info}";;    
+    esac
+}
+
+eth_connect()
+{
+    #change mac addr
+    cd /FisGo/
+    ./changeMacToCustom.sh
+    /sbin/ifconfig eth0 up
+
+    if [ -f /etc/netcfg ]; then
+
+        unset IPADDR MASK GW DNS1 DNS2
+        . /etc/netcfg
+
+        [ -z $IPADDR ] && IPADDR="dhcp"
+
+        if [ "$IPADDR" == "dhcp" ]; then
+            /sbin/udhcpc -b -i eth0 > /dev/null 2>&1 &
+        else
+            /sbin/ifconfig eth0 $IPADDR netmask $MASK
+            [ -z $GW ] || /sbin/route add default metric 20 gw $GW
+
+            /bin/sed -i "/eth0/d" /etc/resolv.conf
+
+            [ -z $DNS1 ] || /bin/echo "nameserver $DNS1 eth0" >> /etc/resolv.conf
+            [ -z $DNS2 ] || /bin/echo "nameserver $DNS2 eth0" >> /etc/resolv.conf
+        fi
+    else
+        /sbin/udhcpc -b -i eth0 > /dev/null 2>&1 &
+    fi
+}
+
+eth_info()
+{
+    local COUNT=0
+
+    echo IPADDR=$(ifconfig eth0 | grep "inet addr" | awk {'print $2'} | sed "s/addr://")
+    echo MASK=$(ifconfig eth0 | grep "inet addr" | awk {'print $4'} | sed "s/Mask://")
+    echo GATEWAY=$(/sbin/ip r | grep eth0 | grep default | awk {'print $3'})
+
+    for ns in $(/bin/cat /etc/resolv.conf | grep nameserver | grep eth0 | awk {'print $2'}); do
+        COUNT=$((COUNT+1))
+        echo DNS$COUNT=$ns
+    done
+}
+
+eth_link()
+{
+    if /sbin/ip link show dev eth0 | /bin/grep -qs "LOWER_UP"; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+case $1 in
+    fiscat) start_fiscat;;
+    wifi) wifi $2;;
+    eth) eth $2;;
+    *) echo "Usage: $(basename $0) {fiscat|wifi|eth}";;
+esac

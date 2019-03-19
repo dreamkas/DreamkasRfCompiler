@@ -1,0 +1,57 @@
+#!/bin/sh
+
+eth_connect()
+{
+    if [ -f /etc/netcfg ]; then
+
+        unset IPADDR MASK GW DNS1 DNS2
+        . /etc/netcfg
+
+        [ -z $IPADDR ] && IPADDR="dhcp"
+
+        if [ "$IPADDR" == "dhcp" ]; then
+            /sbin/udhcpc -b -i eth0 > /dev/null 2>&1 &
+        else
+            /sbin/ifconfig eth0 $IPADDR netmask $MASK
+            [ -z $GW ] || /sbin/route add default metric 20 gw $GW
+
+            /bin/sed -i "/eth0/d" /etc/resolv.conf
+
+            [ -z $DNS1 ] || /bin/echo "nameserver $DNS1 eth0" >> /etc/resolv.conf
+            [ -z $DNS2 ] || /bin/echo "nameserver $DNS2 eth0" >> /etc/resolv.conf
+        fi
+    else
+        /sbin/udhcpc -b -i eth0 > /dev/null 2>&1 &
+    fi
+}
+
+eth_info()
+{
+    local COUNT=0
+
+    echo IPADDR=$(ifconfig eth0 | grep "inet addr" | awk {'print $2'} | sed "s/addr://")
+    echo MASK=$(ifconfig eth0 | grep "inet addr" | awk {'print $4'} | sed "s/Mask://")
+    echo GATEWAY=$(/sbin/ip r | grep eth0 | grep default | awk {'print $3'})
+
+    for ns in $(/bin/cat /etc/resolv.conf | grep nameserver | grep eth0 | awk {'print $2'}); do
+        COUNT=$((COUNT+1))
+        echo DNS$COUNT=$ns
+    done
+}
+
+eth_link()
+{
+    if /sbin/ip link show dev eth0 | /bin/grep -qs "LOWER_UP"; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+case $1 in
+    connect) eth_connect;;
+    info) eth_info;;
+    link) eth_link;;
+    *) echo "Usage: $(basename $0) {connect|link|info}";;
+esac
+
