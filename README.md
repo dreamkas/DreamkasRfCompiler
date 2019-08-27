@@ -23,3 +23,6 @@ libisl
 
 Перед сборкой пользовательского ПО проэкспортировать 
 export LD_LIBRARY_PATH=/usr/local/usr/lib/
+
+на убунту 64 19.04 требуется дополнительно устаеновить пакет
+sudo apt-get install g++-multilib
